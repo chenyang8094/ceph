@@ -710,7 +710,8 @@ int Journal<I>::demote() {
       return r;
     }
 
-    journal::EventEntry event_entry{journal::DemoteEvent{}};
+    journal::EventEntry event_entry{journal::DemoteEvent{},
+                                    ceph_clock_now(nullptr)};
     bufferlist event_entry_bl;
     ::encode(event_entry, event_entry_bl);
 
@@ -832,7 +833,8 @@ uint64_t Journal<I>::append_write_event(uint64_t offset, size_t length,
     event_bl.substr_of(bl, event_offset, event_length);
     journal::EventEntry event_entry(journal::AioWriteEvent(offset + event_offset,
                                                            event_length,
-                                                           event_bl));
+                                                           event_bl),
+                                    ceph_clock_now(nullptr));
 
     bufferlists.emplace_back();
     ::encode(event_entry, bufferlists.back());
@@ -851,6 +853,7 @@ uint64_t Journal<I>::append_io_event(journal::EventEntry &&event_entry,
                                      uint64_t offset, size_t length,
                                      bool flush_entry) {
   bufferlist bl;
+  event_entry.timestamp = ceph_clock_now(nullptr);
   ::encode(event_entry, bl);
   return append_io_events(event_entry.get_event_type(), {bl}, requests, offset,
                           length, flush_entry);
@@ -961,6 +964,7 @@ void Journal<I>::append_op_event(uint64_t op_tid,
   assert(m_image_ctx.owner_lock.is_locked());
 
   bufferlist bl;
+  event_entry.timestamp = ceph_clock_now(nullptr);
   ::encode(event_entry, bl);
 
   Future future;
@@ -994,7 +998,8 @@ void Journal<I>::commit_op_event(uint64_t op_tid, int r, Context *on_safe) {
   ldout(cct, 10) << this << " " << __func__ << ": op_tid=" << op_tid << ", "
                  << "r=" << r << dendl;
 
-  journal::EventEntry event_entry((journal::OpFinishEvent(op_tid, r)));
+  journal::EventEntry event_entry((journal::OpFinishEvent(op_tid, r)),
+                                  ceph_clock_now(nullptr));
 
   bufferlist bl;
   ::encode(event_entry, bl);
