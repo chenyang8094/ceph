@@ -1375,7 +1375,7 @@ void ImageReplayer<I>::shut_down(int r) {
           m_local_journal->stop_external_replay();
           m_local_replay = nullptr;
 
-          delete m_event_preprocessor;
+          EventPreprocessor<I>::destroy(m_event_preprocessor);
           m_event_preprocessor = nullptr;
           ctx->complete(0);
         });
@@ -1444,7 +1444,7 @@ void ImageReplayer<I>::handle_shut_down(int r) {
   m_local_ioctx.close();
   m_remote_ioctx.close();
 
-  delete m_replay_status_formatter;
+  ReplayStatusFormatter<I>::destroy(m_replay_status_formatter);
   m_replay_status_formatter = nullptr;
 
   Context *on_start = nullptr;
