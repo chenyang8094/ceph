@@ -329,7 +329,7 @@ static int read_policy(RGWRados *store,
     }
 
     const rgw_user& bucket_owner = bucket_policy.get_owner().get_id();
-    if (bucket_owner.compare(s->user->user_id) != 0 &&
+    if (!s->system_request && bucket_owner.compare(s->user->user_id) != 0 &&
         !s->auth_identity->is_admin_of(bucket_owner) &&
         !bucket_policy.verify_permission(*s->auth_identity, s->perm_mask,
                                          RGW_PERM_READ)) {
