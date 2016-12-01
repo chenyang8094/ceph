@@ -8718,9 +8718,10 @@ void ReplicatedPG::submit_log_entries(
   dout(10) << __func__ << " " << entries << dendl;
   assert(is_primary());
 
+  eversion_t version;
   if (!entries.empty()) {
     assert(entries.rbegin()->version >= projected_last_update);
-    projected_last_update = entries.rbegin()->version;
+    version = projected_last_update = entries.rbegin()->version;
   }
 
   boost::intrusive_ptr<RepGather> repop;
@@ -8730,6 +8731,7 @@ void ReplicatedPG::submit_log_entries(
       std::move(manager),
       std::move(op),
       std::move(_on_complete));
+    repop->v = version;
   } else {
     on_complete = std::move(_on_complete);
   }
