@@ -3220,8 +3220,10 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
   }
 
   if (ctx->update_log_only) {
+    if (result >= 0)
+      do_osd_op_effects(ctx, m->get_connection());
+
     dout(20) << __func__ << " update_log_only -- result=" << result << dendl;
-    assert(result < 0);
     // save just what we need from ctx
     MOSDOpReply *reply = ctx->reply;
     ctx->reply = nullptr;
@@ -6760,9 +6762,13 @@ int ReplicatedPG::prepare_transaction(OpContext *ctx)
     return result;
   }
 
-  // read-op?  done?
+  // read-op?  write-op noop? done?
   if (ctx->op_t->empty() && !ctx->modify) {
     unstable_stats.add(ctx->delta_stats);
+    if (ctx->op->may_write() &&
+	get_osdmap()->test_flag(CEPH_OSDMAP_REQUIRE_KRAKEN)) {
+      ctx->update_log_only = true;
+    }
     return result;
   }
 
@@ -6798,8 +6804,7 @@ int ReplicatedPG::prepare_transaction(OpContext *ctx)
   return result;
 }
 
-void ReplicatedPG::finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc,
-			      bool scrub_ok)
+void ReplicatedPG::finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc)
 {
   const hobject_t& soid = ctx->obs->oi.soid;
   dout(20) << __func__ << " " << soid << " " << ctx
@@ -6957,8 +6962,6 @@ void ReplicatedPG::finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc
     ctx->obc->ssc->exists = true;
     ctx->obc->ssc->snapset = ctx->new_snapset;
   }
-
-  apply_ctx_scrub_stats(ctx, scrub_ok);
 }
 
 void ReplicatedPG::apply_stats(
@@ -6977,16 +6980,16 @@ void ReplicatedPG::apply_stats(
     else if (cmp(soid, last_backfill_started, get_sort_bitwise()) <= 0)
       pending_backfill_updates[soid].stats.add(delta_stats);
   }
-}
 
-void ReplicatedPG::apply_ctx_scrub_stats(OpContext *ctx, bool scrub_ok)
-{
-  const hobject_t& soid = ctx->obs->oi.soid;
-  if (!scrub_ok && scrubber.active) {
-    assert(cmp(soid, scrubber.start, get_sort_bitwise()) < 0 ||
-	   cmp(soid, scrubber.end, get_sort_bitwise()) >= 0);
-    if (cmp(soid, scrubber.start, get_sort_bitwise()) < 0)
-      scrub_cstat.add(ctx->delta_stats);
+  if (is_primary() && scrubber.active) {
+    if (cmp(soid, scrubber.start, get_sort_bitwise()) < 0 ||
+	cmp(soid, scrubber.end, get_sort_bitwise()) >= 0) {
+      if (cmp(soid, scrubber.start, get_sort_bitwise()) < 0)
+	scrub_cstat.add(delta_stats);
+    } else {
+      /* Must be updating oi digest values */
+      assert(delta_stats == object_stat_sum_t());
+    }
   }
 }
 
@@ -8735,9 +8738,10 @@ void ReplicatedPG::submit_log_entries(
   dout(10) << __func__ << " " << entries << dendl;
   assert(is_primary());
 
+  eversion_t version;
   if (!entries.empty()) {
     assert(entries.rbegin()->version >= projected_last_update);
-    projected_last_update = entries.rbegin()->version;
+    version = projected_last_update = entries.rbegin()->version;
   }
 
   boost::intrusive_ptr<RepGather> repop;
@@ -8747,6 +8751,7 @@ void ReplicatedPG::submit_log_entries(
       std::move(manager),
       std::move(op),
       std::move(_on_complete));
+    repop->v = version;
   } else {
     on_complete = std::move(_on_complete);
   }
@@ -11646,7 +11651,6 @@ void ReplicatedPG::hit_set_remove_all()
     utime_t now = ceph_clock_now(cct);
     ctx->mtime = now;
     hit_set_trim(ctx, 0);
-    apply_ctx_scrub_stats(ctx.get());
     simple_opc_submit(std::move(ctx));
   }
 
@@ -11865,7 +11869,6 @@ void ReplicatedPG::hit_set_persist()
 
   hit_set_trim(ctx, max);
 
-  apply_ctx_scrub_stats(ctx.get());
   simple_opc_submit(std::move(ctx));
 }
 
@@ -13035,7 +13038,7 @@ void ReplicatedPG::scrub_snapshot_metadata(
     ctx->mtime = utime_t();      // do not update mtime
     ctx->new_obs.oi.set_data_digest(p->second.first);
     ctx->new_obs.oi.set_omap_digest(p->second.second);
-    finish_ctx(ctx.get(), pg_log_entry_t::MODIFY, true, true);
+    finish_ctx(ctx.get(), pg_log_entry_t::MODIFY);
 
     ctx->register_on_success(
       [this]() {
@@ -13062,13 +13065,6 @@ void ReplicatedPG::_scrub_finish()
   bool repair = state_test(PG_STATE_REPAIR);
   bool deep_scrub = state_test(PG_STATE_DEEP_SCRUB);
   const char *mode = (repair ? "repair": (deep_scrub ? "deep-scrub" : "scrub"));
-
-  if (pool.info.is_hacky_ecoverwrites()) {
-    dout(10) << __func__
-	     << ": skipping stat comparisons since hacky_overwrites are enabled"
-	     << dendl;
-    return;
-  }
 
   if (info.stats.stats_invalid) {
     info.stats.stats = scrub_cstat;
@@ -13288,7 +13284,6 @@ boost::statechart::result ReplicatedPG::AwaitAsyncWork::react(const DoSnapWork&)
 	  pg->snap_trimmer_machine.process_event(RepopsComplete());
       });
 
-    pg->apply_ctx_scrub_stats(ctx.get());
     pg->simple_opc_submit(std::move(ctx));
   }
 
